@@ -36,7 +36,6 @@ from lightrag.utils import (
     safe_unicode_decode,
     logger,
 )
-from lightrag.api import __api_version__
 
 
 # Custom exception for retry mechanism
@@ -74,7 +73,7 @@ async def anthropic_complete_if_cache(
         api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     default_headers = {
-        "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/{__api_version__}",
+        "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/1000",
         "Content-Type": "application/json",
     }
 

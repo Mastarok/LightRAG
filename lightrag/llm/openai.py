@@ -28,7 +28,6 @@ from lightrag.utils import (
 )
 
 from lightrag.types import GPTKeywordExtractionFormat
-from lightrag.api import __api_version__
 
 import numpy as np
 import base64
@@ -95,7 +94,7 @@ def create_openai_async_client(
         api_key = os.environ["OPENAI_API_KEY"]
 
     default_headers = {
-        "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/{__api_version__}",
+        "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/1000",
         "Content-Type": "application/json",
     }
 
