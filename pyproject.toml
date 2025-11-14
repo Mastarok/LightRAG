@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lightrag-hku"
+name = "lightrag-core"
 dynamic = ["version"]
-authors = [{ name = "Zirui Guo" }]
+authors = [{ name = "Pan Zhiyuan" }]
 description = "LightRAG: Simple and Fast Retrieval-Augmented Generation"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,7 +27,7 @@ dependencies = [
     "json_repair",
     "nano-vectordb",
     "networkx",
-    "numpy>=1.24.0,<2.0.0",
+    "numpy>=1.24.0",
     "pandas>=2.0.0,<2.4.0",
     "pipmaster",
     "pydantic",
@@ -74,7 +74,7 @@ offline-llm = [
 
 offline = [
     # Complete offline package (includes api for document processing, plus storage and LLM)
-    "lightrag-hku[api,offline-storage,offline-llm]",
+    "lightrag-core[offline-storage,offline-llm]",
 ]
 
 evaluation = [
@@ -91,16 +91,6 @@ observability = [
     "langfuse>=3.8.1",
 ]
 
-[project.scripts]
-lightrag-server = "lightrag.api.lightrag_server:main"
-lightrag-gunicorn = "lightrag.api.run_with_gunicorn:main"
-lightrag-download-cache = "lightrag.tools.download_cache:main"
-
-[project.urls]
-Homepage = "https://github.com/HKUDS/LightRAG"
-Documentation = "https://github.com/HKUDS/LightRAG"
-Repository = "https://github.com/HKUDS/LightRAG"
-"Bug Tracker" = "https://github.com/HKUDS/LightRAG/issues"
 
 [tool.setuptools.packages.find]
 include = ["lightrag*"]
@@ -121,9 +111,3 @@ include-package-data = true
 
 [tool.setuptools.dynamic]
 version = { attr = "lightrag.__version__" }
-
-[tool.setuptools.package-data]
-lightrag = ["api/webui/**/*", "api/static/**/*"]
-
-[tool.ruff]
-target-version = "py310"
