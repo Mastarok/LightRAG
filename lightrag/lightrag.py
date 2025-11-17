@@ -90,6 +90,7 @@ from lightrag.operate import (
     merge_nodes_and_edges,
     kg_query,
     naive_query,
+    fulltext_query,
     rebuild_knowledge_from_chunks,
 )
 from lightrag.constants import GRAPH_FIELD_SEP
@@ -128,6 +129,14 @@ config.read("config.ini", "utf-8")
 @dataclass
 class LightRAG:
     """LightRAG: Simple and Fast Retrieval-Augmented Generation."""
+    # Knowledge Graph Configuration
+    # ---
+    enable_knowledge_graph: bool = field(
+        default=get_env_value("ENABLE_KNOWLEDGE_GRAPH", True, bool)
+    )
+    """Enable knowledge graph construction. When False, only chunking and vector storage are performed.
+    This significantly speeds up document processing when full knowledge graph is not needed.
+    Default is True for backward compatibility."""
 
     # Directory
     # ---
@@ -1863,13 +1872,20 @@ class LightRAG:
                             await asyncio.gather(*first_stage_tasks)
 
                             # Stage 2: Process entity relation graph (after text_chunks are saved)
-                            entity_relation_task = asyncio.create_task(
-                                self._process_extract_entities(
-                                    chunks, pipeline_status, pipeline_status_lock
+                            if self.enable_knowledge_graph:
+                                entity_relation_task = asyncio.create_task(
+                                    self._process_extract_entities(
+                                        chunks, pipeline_status, pipeline_status_lock
+                                    )
                                 )
-                            )
-                            chunk_results = await entity_relation_task
+                                chunk_results = await entity_relation_task
+                            else:
+                                # 跳过实体提取，设置空结果
+                                chunk_results = []
+                                logger.info(f"Knowledge graph disabled - skipping entity extraction for file: {file_path}")
+
                             file_extraction_stage_ok = True
+
 
                         except Exception as e:
                             # Check if this is a user cancellation
@@ -1950,25 +1966,29 @@ class LightRAG:
                                             "User cancelled"
                                         )
 
-                                # Use chunk_results from entity_relation_task
-                                await merge_nodes_and_edges(
-                                    chunk_results=chunk_results,  # result collected from entity_relation_task
-                                    knowledge_graph_inst=self.chunk_entity_relation_graph,
-                                    entity_vdb=self.entities_vdb,
-                                    relationships_vdb=self.relationships_vdb,
-                                    global_config=asdict(self),
-                                    full_entities_storage=self.full_entities,
-                                    full_relations_storage=self.full_relations,
-                                    doc_id=doc_id,
-                                    pipeline_status=pipeline_status,
-                                    pipeline_status_lock=pipeline_status_lock,
-                                    llm_response_cache=self.llm_response_cache,
-                                    entity_chunks_storage=self.entity_chunks,
-                                    relation_chunks_storage=self.relation_chunks,
-                                    current_file_number=current_file_number,
-                                    total_files=total_files,
-                                    file_path=file_path,
-                                )
+                                # 仅当启用知识图谱时才执行合并操作
+                                if self.enable_knowledge_graph and chunk_results:
+                                    await merge_nodes_and_edges(
+                                        chunk_results=chunk_results,
+                                        knowledge_graph_inst=self.chunk_entity_relation_graph,
+                                        entity_vdb=self.entities_vdb,
+                                        relationships_vdb=self.relationships_vdb,
+                                        global_config=asdict(self),
+                                        full_entities_storage=self.full_entities,
+                                        full_relations_storage=self.full_relations,
+                                        doc_id=doc_id,
+                                        pipeline_status=pipeline_status,
+                                        pipeline_status_lock=pipeline_status_lock,
+                                        llm_response_cache=self.llm_response_cache,
+                                        entity_chunks_storage=self.entity_chunks,
+                                        relation_chunks_storage=self.relation_chunks,
+                                        current_file_number=current_file_number,
+                                        total_files=total_files,
+                                        file_path=file_path,
+                                    )
+                                else:
+                                    if not self.enable_knowledge_graph:
+                                        logger.info(f"Knowledge graph disabled - skipping entity/relation merging for file: {file_path}")
 
                                 # Record processing end time
                                 processing_end_time = int(time.time())
@@ -2691,6 +2711,15 @@ class LightRAG:
                 )
             elif param.mode == "naive":
                 query_result = await naive_query(
+                    query.strip(),
+                    self.chunks_vdb,
+                    param,
+                    global_config,
+                    hashing_kv=self.llm_response_cache,
+                    system_prompt=system_prompt,
+                )
+            elif param.mode == "fulltext":
+                query_result = await fulltext_query(
                     query.strip(),
                     self.chunks_vdb,
                     param,
