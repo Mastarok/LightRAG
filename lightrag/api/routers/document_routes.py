@@ -959,13 +959,13 @@ def _extract_pdf_pypdf(file_bytes: bytes, password: str = None) -> str:
     reader = PdfReader(pdf_file)
 
     # Check if PDF is encrypted
-    if reader.is_encrypted:
-        if not password:
-            raise Exception("PDF is encrypted but no password provided")
+    # if reader.is_encrypted:
+    #     if not password:
+    #         raise Exception("PDF is encrypted but no password provided")
 
-        decrypt_result = reader.decrypt(password)
-        if decrypt_result == 0:
-            raise Exception("Incorrect PDF password")
+    #     decrypt_result = reader.decrypt(password)
+    #     if decrypt_result == 0:
+    #         raise Exception("Incorrect PDF password")
 
     # Extract text from all pages
     content = ""
