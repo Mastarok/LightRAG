@@ -19,7 +19,7 @@ class QueryRequest(BaseModel):
         description="The query text",
     )
 
-    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass"] = Field(
+    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass","fulltext"] = Field(
         default="mix",
         description="Query mode",
     )
@@ -286,6 +286,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                                     "hybrid_mode": "Combines local and global approaches",
                                     "naive_mode": "Simple vector similarity search",
                                     "mix_mode": "Integrates knowledge graph and vector retrieval",
+                                    "fulltext_mode": "Performs full-text search across documents",
                                 },
                             },
                         },
@@ -336,6 +337,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
         - **naive**: Simple vector similarity search without knowledge graph
         - **mix**: Integrates knowledge graph retrieval with vector search (recommended)
         - **bypass**: Direct LLM query without knowledge retrieval
+        - **fulltext**: Performs full-text search across documents
 
         conversation_history parameteris sent to LLM only, does not affect retrieval results.
 
@@ -561,6 +563,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
         - **naive**: Vector similarity search only
         - **mix**: Integrated knowledge graph + vector retrieval (recommended)
         - **bypass**: Direct LLM query without knowledge retrieval
+        - **fulltext**: Performs full-text search across documents
 
         conversation_history parameteris sent to LLM only, does not affect retrieval results.
 

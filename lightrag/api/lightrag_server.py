@@ -10,6 +10,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_oauth2_redirect_html,
 )
 import os
+import httpx
 import logging
 import logging.config
 import sys
@@ -513,6 +514,7 @@ def create_app(args):
                 history_messages=history_messages,
                 base_url=args.llm_binding_host,
                 api_key=args.llm_binding_api_key,
+                openai_client_configs={"http_client": httpx.AsyncClient(verify=False)},
                 **kwargs,
             )
 
@@ -855,6 +857,8 @@ def create_app(args):
                         "base_url": host,
                         "api_key": api_key,
                         "embedding_dim": embedding_dim,
+                        "client_configs": {"http_client": httpx.AsyncClient(verify=False)}
+                        
                     }
                     if model:
                         kwargs["model"] = model

@@ -13,7 +13,7 @@ if not pm.is_installed("pymilvus"):
     pm.install("pymilvus>=2.6.2")
 
 import configparser
-from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema  # type: ignore
+from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema,Function,FunctionType  # type: ignore
 
 config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
@@ -86,8 +86,22 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
                     nullable=True,
                 ),
+                # Add content field for BM25 full-text search
+                FieldSchema(
+                    name="content",
+                    dtype=DataType.VARCHAR,
+                    max_length=65535,
+                    nullable=True,
+                    enable_analyzer=True,
+                    analyzer_params={"type": "chinese"}  # Enable text analysis for BM25
+                ),
+                FieldSchema(
+                    name="content_bm25",
+                    dtype=DataType.SPARSE_FLOAT_VECTOR,  # Enable text analysis for BM25
+                ),
+
             ]
-            description = "LightRAG chunks vector storage"
+            description = "LightRAG chunks vector storage with BM25 support"
 
         else:
             # Default generic schema (backward compatibility)
@@ -103,12 +117,23 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         # Merge all fields
         all_fields = base_fields + specific_fields
-
-        return CollectionSchema(
+        schema=CollectionSchema(
             fields=all_fields,
             description=description,
             enable_dynamic_field=True,  # Support dynamic fields
         )
+        if self.namespace.endswith("chunks"):
+            bm25_function=Function(
+                name="text_bm25_emb",  # Function name for the BM25 embedding
+                function_type=FunctionType.BM25,
+                input_field_names=["content"],  # Input field for BM25
+                output_field_names=["content_bm25"],  # Output field name
+                params={},
+                )
+            schema.add_function(bm25_function)
+            return schema
+
+        return schema
 
     def _get_index_params(self):
         """Get IndexParams in a version-compatible way"""
@@ -282,6 +307,27 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                             f"[{self.workspace}] IndexParams method failed for full_doc_id: {e}"
                         )
                         self._create_scalar_index_fallback("full_doc_id", "INVERTED")
+                    try:
+                        content_bm25_index = self._get_index_params()
+                        content_bm25_index.add_index(
+                            field_name="content_bm25", 
+                            index_type="SPARSE_INVERTED_INDEX",
+                            metric_type="BM25",
+                            params={
+                                "inverted_index_algo": "DAAT_MAXSCORE",
+                                "bm25_k1": 1.2,
+                                "bm25_b": 0.75
+                            }
+                        )
+                        self._client.create_index(
+                            collection_name=self.final_namespace,
+                            index_params=content_bm25_index,
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            f"[{self.workspace}] IndexParams method failed for content_bm25: {e}"
+                        )
+                        self._create_scalar_index_fallback("content_bm25", "AUTOINDEX")
 
                 # No common indexes needed
 
@@ -302,7 +348,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     self._create_scalar_index_fallback("tgt_id", "INVERTED")
                 elif self.namespace.endswith("chunks"):
                     self._create_scalar_index_fallback("full_doc_id", "INVERTED")
-
+                    self._create_scalar_index_fallback("content_bm25", "AUTOINDEX")
             logger.info(
                 f"[{self.workspace}] Created indexes for collection: {self.namespace}"
             )
@@ -338,6 +384,8 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             specific_fields = {
                 "full_doc_id": {"type": "VarChar"},
                 "file_path": {"type": "VarChar"},
+                "content": {"type": "VarChar"},
+                "content_bm25": {"type": "SPARSE_FLOAT_VECTOR"},
             }
         else:
             specific_fields = {
@@ -370,6 +418,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                 101: "FloatVector",
                 5: "Int64",
                 9: "Double",
+                104: "SPARSE_FLOAT_VECTOR",
             }
             mapped_type = type_mapping.get(existing_type, str(existing_type))
             logger.debug(
@@ -386,6 +435,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             "BigInt": "Int64",
             "DOUBLE": "Double",
             "Float": "Double",
+            "SPARSE_FLOAT_VECTOR": "SparseFloatVector",
         }
 
         original_existing = existing_type
@@ -1091,6 +1141,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             data=embedding,
             limit=top_k,
             output_fields=output_fields,
+             anns_field="vector",
             search_params={
                 "metric_type": "COSINE",
                 "params": {"radius": self.cosine_better_than_threshold},
@@ -1105,6 +1156,58 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             }
             for dp in results[0]
         ]
+
+    async def fulltext_query(
+        self, query: str, top_k: int = 3
+    ) -> list[dict[str, Any]]:
+        """
+        Perform BM25-based full-text search on the content field.
+        
+        Args:
+            query: The search query text
+            top_k: Number of top results to return
+            
+        Returns:
+            List of documents with BM25 scores
+        """
+        try:
+            # Ensure collection is loaded before querying
+            self._ensure_collection_loaded()
+
+            # Include all meta_fields for output
+            output_fields = list(self.meta_fields)
+
+            # Perform BM25 search using the content_bm25 field
+            results = self._client.search(
+                collection_name=self.final_namespace,
+                data=[query],  # BM25 uses text query directly
+                anns_field="content_bm25",  # Search on BM25 field
+                limit=top_k,
+                output_fields=output_fields,
+            )
+            
+            # Format results
+            formatted_results = [
+                {
+                    **dp["entity"],
+                    "id": dp["id"],
+                    "score": dp.get("distance", 0),  # BM25 score
+                    "created_at": dp.get("created_at"),
+                }
+                for dp in results[0]
+            ]
+            
+            logger.debug(
+                f"[{self.workspace}] BM25 full-text search returned {len(formatted_results)} results for query: {query[:50]}..."
+            )
+            
+            return formatted_results
+            
+        except Exception as e:
+            logger.error(
+                f"[{self.workspace}] BM25 full-text search failed: {e}. Falling back to empty results."
+            )
+            return []
 
     async def index_done_callback(self) -> None:
         # Milvus handles persistence automatically
@@ -1352,12 +1455,12 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             - On failure: {"status": "error", "message": "<error details>"}
         """
         try:
-            # Drop the collection and recreate it
+            # Drop the collection
             if self._client.has_collection(self.final_namespace):
                 self._client.drop_collection(self.final_namespace)
 
             # Recreate the collection
-            self._create_collection_if_not_exist()
+            # self._create_collection_if_not_exist()
 
             logger.info(
                 f"[{self.workspace}] Process {os.getpid()} drop Milvus collection {self.namespace}"

@@ -4997,3 +4997,247 @@ async def naive_query(
         return QueryResult(
             response_iterator=response, raw_data=raw_data, is_streaming=True
         )
+
+async def fulltext_query(
+    query: str,
+    chunks_vdb: BaseVectorStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None,
+) -> QueryResult | None:
+    """
+    Execute BM25-based full-text search and return unified QueryResult object.
+
+    Args:
+        query: Query string
+        chunks_vdb: Document chunks vector database (must support fulltext_query)
+        query_param: Query parameters
+        global_config: Global configuration
+        hashing_kv: Cache storage
+        system_prompt: System prompt
+
+    Returns:
+        QueryResult | None: Unified query result object containing:
+            - content: Non-streaming response text content
+            - response_iterator: Streaming response iterator
+            - raw_data: Complete structured data (including references and metadata)
+            - is_streaming: Whether this is a streaming result
+
+        Returns None when no relevant chunks are retrieved.
+    """
+
+    if not query:
+        return QueryResult(content=PROMPTS["fail_response"])
+
+    if query_param.model_func:
+        use_model_func = query_param.model_func
+    else:
+        use_model_func = global_config["llm_model_func"]
+        # Apply higher priority (5) to query relation LLM function
+        use_model_func = partial(use_model_func, _priority=5)
+
+    tokenizer: Tokenizer = global_config["tokenizer"]
+    if not tokenizer:
+        logger.error("Tokenizer not found in global configuration.")
+        return QueryResult(content=PROMPTS["fail_response"])
+
+    # Perform BM25 full-text search
+    try:
+        logger.info(f"[fulltext_query] Performing BM25 search for: {query[:50]}...")
+        chunks = await chunks_vdb.fulltext_query(query, top_k=query_param.chunk_top_k or query_param.top_k)
+    except Exception as e:
+        logger.error(f"[fulltext_query] BM25 search failed: {e}")
+        return QueryResult(content=PROMPTS["fail_response"])
+
+    if chunks is None or len(chunks) == 0:
+        logger.info(
+            "[fulltext_query] No relevant document chunks found; returning no-result."
+        )
+        return None
+
+    # Calculate dynamic token limit for chunks
+    max_total_tokens = getattr(
+        query_param,
+        "max_total_tokens",
+        global_config.get("max_total_tokens", DEFAULT_MAX_TOTAL_TOKENS),
+    )
+
+    # Calculate system prompt template tokens (excluding content_data)
+    user_prompt = f"\n\n{query_param.user_prompt}" if query_param.user_prompt else "n/a"
+    response_type = (
+        query_param.response_type
+        if query_param.response_type
+        else "Multiple Paragraphs"
+    )
+
+    # Use the provided system prompt or default
+    sys_prompt_template = (
+        system_prompt if system_prompt else PROMPTS["naive_rag_response"]
+    )
+
+    # Create a preliminary system prompt with empty content_data to calculate overhead
+    pre_sys_prompt = sys_prompt_template.format(
+        response_type=response_type,
+        user_prompt=user_prompt,
+        content_data="",  # Empty for overhead calculation
+    )
+
+    # Calculate available tokens for chunks
+    sys_prompt_tokens = len(tokenizer.encode(pre_sys_prompt))
+    query_tokens = len(tokenizer.encode(query))
+    buffer_tokens = 200  # reserved for reference list and safety buffer
+    available_chunk_tokens = max_total_tokens - (
+        sys_prompt_tokens + query_tokens + buffer_tokens
+    )
+
+    logger.debug(
+        f"Fulltext query token allocation - Total: {max_total_tokens}, SysPrompt: {sys_prompt_tokens}, Query: {query_tokens}, Buffer: {buffer_tokens}, Available for chunks: {available_chunk_tokens}"
+    )
+
+    # Process chunks using unified processing with dynamic token limit
+    processed_chunks = await process_chunks_unified(
+        query=query,
+        unique_chunks=chunks,
+        query_param=query_param,
+        global_config=global_config,
+        source_type="fulltext",
+        chunk_token_limit=available_chunk_tokens,  # Pass dynamic limit
+    )
+
+    # Generate reference list from processed chunks using the new common function
+    reference_list, processed_chunks_with_ref_ids = generate_reference_list_from_chunks(
+        processed_chunks
+    )
+
+    logger.info(f"Final context: {len(processed_chunks_with_ref_ids)} chunks")
+
+    # Build raw data structure for fulltext mode using processed chunks with reference IDs
+    raw_data = convert_to_user_format(
+        [],  # fulltext mode has no entities
+        [],  # fulltext mode has no relationships
+        processed_chunks_with_ref_ids,
+        reference_list,
+        "fulltext",
+    )
+
+    # Add complete metadata for fulltext mode
+    if "metadata" not in raw_data:
+        raw_data["metadata"] = {}
+    raw_data["metadata"]["keywords"] = {
+        "high_level": [],  # fulltext mode has no keyword extraction
+        "low_level": [],  # fulltext mode has no keyword extraction
+    }
+    raw_data["metadata"]["processing_info"] = {
+        "total_chunks_found": len(chunks),
+        "final_chunks_count": len(processed_chunks_with_ref_ids),
+    }
+
+    # Build text_units_context from processed chunks with reference IDs
+    chunks_context = []
+    for i, chunk in enumerate(processed_chunks_with_ref_ids):
+        chunks_context.append(
+            {
+                "reference_id": chunk["reference_id"],
+                "content": chunk["content"],
+            }
+        )
+
+    text_units_str = "\n".join(
+         json.dumps(text_unit, ensure_ascii=False) for text_unit in chunks_context
+    )
+    reference_list_str = "\n".join(
+        f"[{ref['reference_id']}] {ref['file_path']}"
+        for ref in reference_list
+        if ref["reference_id"]
+    )
+
+    fulltext_context_template = PROMPTS["naive_query_context"]
+    context_content = fulltext_context_template.format(
+        text_chunks_str=text_units_str,
+        reference_list_str=reference_list_str,
+    )
+
+    if query_param.only_need_context and not query_param.only_need_prompt:
+        return QueryResult(content=context_content, raw_data=raw_data)
+
+    sys_prompt = sys_prompt_template.format(
+        response_type=query_param.response_type,
+        user_prompt=user_prompt,
+        content_data=context_content,
+    )
+
+    user_query = query
+
+    if query_param.only_need_prompt:
+        prompt_content = "\n\n".join([sys_prompt, "---User Query---", user_query])
+        return QueryResult(content=prompt_content, raw_data=raw_data)
+
+    # Handle cache
+    args_hash = compute_args_hash(
+        query_param.mode,
+        query,
+        query_param.response_type,
+        query_param.chunk_top_k,
+        query_param.max_total_tokens,
+        query_param.user_prompt or "",
+        query_param.enable_rerank,
+    )
+
+    cached_result = await handle_cache(
+        hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
+    )
+
+    if cached_result is not None:
+        cached_response, _ = cached_result
+        logger.info(
+            " == LLM cache == Query cache hit, using cached response as query result"
+        )
+        response = cached_response
+    else:
+        response = await use_model_func(
+            user_query,
+            system_prompt=sys_prompt,
+            history_messages=query_param.conversation_history,
+            enable_cot=True,
+            stream=query_param.stream,
+        )
+
+        # Save to cache if enabled and response is not streaming
+        if (
+            hashing_kv
+            and hashing_kv.global_config.get("enable_llm_cache")
+            and not query_param.stream
+        ):
+            queryparam_dict = {
+                "mode": query_param.mode,
+                "response_type": query_param.response_type,
+                "chunk_top_k": query_param.chunk_top_k,
+                "max_total_tokens": query_param.max_total_tokens,
+                "user_prompt": query_param.user_prompt,
+                "enable_rerank": query_param.enable_rerank,
+            }
+            await save_to_cache(
+                hashing_kv,
+                args_hash,
+                response,
+                user_query,
+                "fulltext",
+                queryparam_dict,
+                cache_type="query",
+            )
+
+    # Handle streaming vs non-streaming responses
+    if query_param.stream:
+        # For streaming, response is an AsyncIterator
+        return QueryResult(
+            content="",  # Content will be streamed
+            response_iterator=response,
+            raw_data=raw_data,
+            is_streaming=True,
+        )
+    else:
+        # For non-streaming, response is a string
+        if isinstance(response, str):
+            response = remove_think_tags(response)
+        return QueryResult(content=response, raw_data=raw_data, is_streaming=False)
